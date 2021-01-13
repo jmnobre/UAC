@@ -1,0 +1,224 @@
+#!/bin/bash
+#
+# Usage: see usage()
+#
+
+declare WORKDIR
+
+if [[ "$0" =~ / ]]; then WORKDIR="${0%/*}"; else WORKDIR="$PWD"; fi
+if [[ ! "$0" =~ ^/ ]]; then WORKDIR="$(cd $WORKDIR; pwd)"; fi
+
+declare SCRIPT="${0##*/}"
+declare TAG="${SCRIPT%.*}"
+declare VERSION=0.1
+
+# environment setup
+export TMPDIR="$(mktemp -d)"
+
+declare STDIN
+declare STDOUT
+
+# usage: cleanup
+# called by a finalizing trap to cleanup the environment
+function cleanup( ) {
+	rm -Rf "$TMPDIR"
+	if [[ ! -z "$STDIN" ]]; then 
+		exec 0<&-
+		exec 0<&$STDIN
+	fi
+	if [[ ! -z "$STDOUT" ]]; then
+		exec 1<&-
+		exec 1>&$STDOUT
+	fi
+}
+
+trap "cleanup" EXIT
+
+# usage: usage
+# shows the usage text and exits with RC=0
+function usage( ) {
+	cat - << __EOT
+	
+$SCRIPT, version $VERSION
+	
+Usage:
+	$SCRIPT <source> [<target>] | --help | --version
+	
+	where <source> is the source text file with the rues definitions, and <target> is
+	the target the formated database.
+	If <source> is -, the stdin will be used.
+	If <target> is not specified, the output will be sent to stdout.
+	
+	--help shows this hep text
+	--version displays the current version
+
+__EOT
+
+	exit 0
+}
+
+# usage: error <message> [<rc>]
+# shows an error on the stderr; if <rc> is specified, exists with <rc> exit code.
+function error( ) {
+	echo "*** $1" >&2
+	if [[ -z "$2" ]]; then return; fi
+	
+	exit $2
+}
+
+case "$1" in
+	--help) 
+		usage
+		;;
+		
+	--version)
+		echo $SCRIPT, version $VERSION
+		exit 0
+		;;
+esac
+
+# hook the input/output files
+if [[ -z "$1" ]]; then
+	error "no source file specified; use --help for help" 1
+elif [[ "$1" != '-' ]]; then 
+	if [[ ! -r "$1" ]]; then error "can't access input file '$1'" 1; fi
+	exec {STDIN}<&0
+	exec 0<"$1"
+fi
+
+if [[ ! -z "$2" ]]; then
+	if [[ ! -w "$1" ]]; then error "can't overwrite output file '$2'" 1; fi
+	exec {STDOUT}>&1
+	exec 1>"$2"
+fi
+
+# process the file
+cat -n - |
+	sed -r 's/^\s+//;s/#.*//;s/\s+/ /g;s/ $//;/^[0-9]+$/d;s/ /\t/;/:$/{s/:$//;s/\t/\tU\t/;s/\./\\\\./g;s/\?/./g;s/\*/.*/g;s/;/|/g;s/ //g;b z};/\t[^\+\-]/{s/\t/\tE\t/;b z};/\t\+/{s/\+/.\tA\t/;b a};s/\-/.\tD\t/;:a;/\s[0-9]+(\.[0-9]+){3}\-[0-9]+(\.[0-9]+){0,3}$/{s/\./R/;s/\-/\t/;b z};/\//{s/\./N/;s/\//\t/;b z};/\s[0-9]+(\.[0-9]+){3}$/{s/\./A/;b z};s/\./D/;s/[^a-z0-9\?\*\t ]/\\&/gi;s/\?/./g;s/\*/.*/g;:z;s/ //g' |
+	awk -f <(
+		cat - << __EOS
+	
+	function error( msg, rc ) {
+		print "*** error on line "\$1": "msg >> "/dev/stderr" 
+		exit rc
+	}
+	
+	function parseDotX( dotx, minsz ) {
+		if(minsz > 4)error( "invalid IP size: "minsz, 1)
+		if( minsz == 0 )minsz=1
+		
+		delete parts
+		split( dotx, parts, "." )
+		
+		if( length(parts) < minsz )error("unexpected IP representation: "dotx"; must have at least "minsz" parts", 2)
+		
+		bin=0
+		for(i=1;i<=length(parts);i++) {
+			if( parts[i] > 255 )error( "invalid address component: "parts[i]" on "dotx, 2 )
+			bin=256*bin+parts[i]
+		}
+		
+		return bin
+	}
+	
+	function parseIP( addr ) {
+		return parseDotX( addr, 4 )
+	}
+	
+	function checkIP( ip ) {
+		return (ip!=0) && (ip<0xe0000000);
+	}
+	
+	BEGIN {
+		ST=0
+	}
+	
+	(\$2=="U") {
+		print "U\t"\$3
+		ST=1
+		next
+	}
+	
+	(ST==0) {
+		error( "no user mask defined", 1 )
+	}
+	
+	(ST==1) { ST=2 }
+	
+	(\$2=="A") {
+		ip=parseIP( \$4 )
+		if( !checkIP(ip) )error( "bad IP: "\$4, 2 )
+		print "A\t"ip"\t"\$3
+		next
+	}
+	
+	(\$2=="D") {
+		print "D\t"\$4"\t"\$3
+		next
+	}
+	
+	(\$2=="R") {
+		ips=parseIP( \$4 )
+		if(!checkIP(ips))error( "bad start IP: " \$4, 2 )
+		
+		dots=length(gensub(/[^\.]/,"","g",\$5))
+		
+		if( dots == 3) {
+			ipe=parseIP( \$5 )
+			if(!checkIP(ipe))error( "bad end IP: "\$4, 2 )
+			if( ipe < ips )error( "IP end must be higher than IP start", 2 )
+		} else {
+			ipx=and(ips,lshift(256,8*dots)-1)
+			ipt=parseDotX(\$5,dots)
+			
+			if( ipt < ipx )error( "IP end must be higher than IP start", 2 )
+			
+			ipe=ips+(ipt-ipx)
+		}
+		
+		print "R\t"ips"\t"ipe"\t"\$3
+		next
+	}
+	
+	(\$2=="N") {
+		if( match( \$4, /\\./ ) ) {
+			ipb=parseDotX( \$4 )
+		}
+		else {
+			if( (ipb=\$4) != 0 )error( "invalid network base: "\$4, 2 )
+		}
+		
+		if( match( \$5, /\\./ ) ) {
+			mask=parseDotX( \$5 )
+		}
+		else {
+			if( \$5 > 32 )error( "invalid network mask: " \$5, 2 )
+			mask=and(0xffffffff,compl(lshift(1, (32-\$5))-1))
+		}
+		
+		if( mask == 0 ) {
+			if( ipb != 0 )error( "bad network: .../0", 2 )
+		}
+		else {
+			if( ipb == 0 )error( "bad network: 0/...", 2 )
+		}
+		
+		if( ipb != 0 ) {
+			if(!checkIP(ipb))error( "invalid network base: "\$4, 2)
+		}
+		
+		print "N\t"and(ipb,mask)"\t"mask"\t"\$3
+	}
+	
+	END {
+		if( ST==1 )error( "File can't finish on a user mask", 2 )
+	}
+		
+__EOS
+) | tee >(md5sum | awk '{print $1}' > "$TMPDIR/md5")
+
+cat "$TMPDIR/md5"
+
+exit 0
+
+
