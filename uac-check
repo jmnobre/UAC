@@ -112,25 +112,21 @@ while [[ ! -z "$1" ]]; do
 					
 					(\$1=="A") {
 						if( \$2 == IP ) exit 0
-						ST=1
 						next
 					}
 					
 					(\$1=="R") {
 						if( (\$2 <= IP) && (\$3 >= IP) )exit 0
-						ST=1
 						next
 					}
 					
 					(\$1=="N") {
 						if( and(IP,\$3)==\$2 )exit 0
-						ST=1
 						next
 					}
 					
 					(\$1=="D") {
 						if( match( HOST, "^("\$2")\$" ) )exit 0
-						ST=1
 						next
 					}
 					
